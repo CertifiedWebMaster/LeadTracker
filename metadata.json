@@ -1,0 +1,6 @@
+{
+  "name": "Lead Tracker",
+  "description": "Sales Rabbit alternative for direct sales reps to drop GPS pins, track leads, build territories, and sync data offline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
