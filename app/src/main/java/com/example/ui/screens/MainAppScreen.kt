@@ -10,6 +10,9 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -67,6 +70,7 @@ sealed class AppScreen(val route: String, val title: String) {
     object Map : AppScreen("map_route", "Grid Map")
     object Territories : AppScreen("territories_route", "Territories")
     object Sync : AppScreen("sync_route", "Cloud Sync")
+    object User : AppScreen("user_route", "User Menu")
 }
 
 @Composable
@@ -138,30 +142,44 @@ fun MainAppScreen(
 
                     // Online/offline synclink pill
                     val unsyncedCount = allLeadsRaw.count { !it.isSynced }
-                    Surface(
-                        color = if (unsyncedCount == 0) Color(0xFFE8F5E9) else Color(0xFFFFEBEE),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, if (unsyncedCount == 0) Color(0xFFC8E6C9) else Color(0xFFFFCDD2))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    val isOffline = unsyncedCount > 0
+                    val lastSyncLog = syncLogs.firstOrNull { it.status == "SUCCESS" }
+                    val lastSyncTimeStr = lastSyncLog?.timestamp?.let { 
+                        java.text.SimpleDateFormat("MMM dd, HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
+                    } ?: "Never"
+
+                    Column(horizontalAlignment = Alignment.End) {
+                        Surface(
+                            color = if (!isOffline) Color(0xFFE8F5E9) else Color(0xFFFFEBEE),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (!isOffline) Color(0xFFC8E6C9) else Color(0xFFFFCDD2))
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .background(if (unsyncedCount == 0) Color(0xFF2E7D32) else Color(0xFFC62828), CircleShape)
-                            )
-                            Text(
-                                text = if (unsyncedCount == 0) "Synced" else "Offline ($unsyncedCount)",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                color = if (unsyncedCount == 0) Color(0xFF2E7D32) else Color(0xFFC62828)
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .background(if (!isOffline) Color(0xFF2E7D32) else Color(0xFFC62828), CircleShape)
+                                )
+                                Text(
+                                    text = if (!isOffline) "Online" else "Offline ($unsyncedCount)",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = if (!isOffline) Color(0xFF2E7D32) else Color(0xFFC62828)
+                                )
+                            }
                         }
+                        Text(
+                            text = "Last sync: $lastSyncTimeStr",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp, end = 4.dp)
+                        )
                     }
                 }
             }
@@ -206,6 +224,13 @@ fun MainAppScreen(
                     label = { Text("Cloud Sync") },
                     modifier = Modifier.testTag("nav_item_sync")
                 )
+                NavigationBarItem(
+                    selected = currentScreen == AppScreen.User,
+                    onClick = { currentScreen = AppScreen.User },
+                    icon = { Icon(Icons.Default.Person, contentDescription = "User Menu") },
+                    label = { Text("User") },
+                    modifier = Modifier.testTag("nav_item_user")
+                )
             }
         }
     ) { paddingValues ->
@@ -217,7 +242,7 @@ fun MainAppScreen(
             when (currentScreen) {
                 AppScreen.Map -> {
                     MapDashboard(
-                        leads = leads,
+                        rawLeads = leads,
                         allLeadsCount = allLeadsRaw.size,
                         territories = territories,
                         selectedTerritoryId = selectedTerritoryId,
@@ -248,6 +273,16 @@ fun MainAppScreen(
                         isSyncing = isSyncing,
                         onSyncClick = { viewModel.syncWithBackend() },
                         onClearLogs = { viewModel.clearLogs() }
+                    )
+                }
+                AppScreen.User -> {
+                    UserMenuScreen(
+                        allLeads = allLeadsRaw,
+                        onImportLeads = { imported ->
+                            imported.forEach { lead ->
+                                viewModel.addLead(lead.name, lead.address, lead.status, lead.latitude, lead.longitude, lead.notes, lead.phone, lead.territoryId)
+                            }
+                        }
                     )
                 }
             }
@@ -344,10 +379,21 @@ data class HousePlot(
         }
 }
 
+fun calculateDistanceMiles(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val earthRadiusMiles = 3958.8
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return earthRadiusMiles * c
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapDashboard(
-    leads: List<Lead>,
+    rawLeads: List<Lead>,
     allLeadsCount: Int,
     territories: List<Territory>,
     selectedTerritoryId: Long?,
@@ -357,6 +403,13 @@ fun MapDashboard(
     onDeleteLead: (Lead) -> Unit,
     viewModel: LeadViewModel
 ) {
+    val selectedStatusFilters = remember { androidx.compose.runtime.mutableStateListOf<String>() }
+    val leads = if (selectedStatusFilters.isEmpty()) {
+        rawLeads
+    } else {
+        rawLeads.filter { it.status in selectedStatusFilters }
+    }
+
     var mapOffsetX by remember { mutableStateOf(0f) }
     var mapOffsetY by remember { mutableStateOf(0f) }
     var mapScale by remember { mutableStateOf(1f) }
@@ -372,6 +425,7 @@ fun MapDashboard(
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingAddCoordinates by remember { mutableStateOf<Offset?>(null) }
     var pendingAddressSuggestion by remember { mutableStateOf("") }
+    var pendingCounty by remember { mutableStateOf<String?>(null) }
 
     var selectedLeadDetail by remember { mutableStateOf<Lead?>(null) }
     val isSystemDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -778,7 +832,7 @@ fun MapDashboard(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            IconButton(
+            Button(
                 onClick = {
                     if (useLeafletMap) {
                         userLocationCenterTrigger = userLocationCenterTrigger + 1
@@ -788,16 +842,22 @@ fun MapDashboard(
                         mapScale = 1.0f
                     }
                 },
-                colors = IconButtonDefaults.iconButtonColors(
+                colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant
                 ),
-                modifier = Modifier.size(36.dp)
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.height(36.dp)
             ) {
                 Icon(
-                    Icons.Default.Refresh,
+                    Icons.Default.LocationOn,
                     contentDescription = "Center Map",
                     modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Find My Loc",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
                 )
             }
         }
@@ -835,9 +895,47 @@ fun MapDashboard(
                     useLeafletMap = true
                     selectedMapLayer = "satellite"
                 },
-                label = { Text("Satellite (Google Earth)", fontSize = 10.sp) },
+                label = { Text("Satellite", fontSize = 10.sp) },
                 modifier = Modifier.height(28.dp).testTag("satellite_map_chip")
             )
+        }
+
+        // Status Filter Row
+        androidx.compose.foundation.lazy.LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            item {
+                Text("Filters:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            }
+            
+            val statusDisplayNames = mapOf(
+                "NOT_HOME" to "Not Home",
+                "WARM_LEAD" to "Warm Lead",
+                "CUSTOMER" to "Closed Sale",
+                "REFUSED" to "Not Int.",
+                "GO_BACK" to "Follow Up"
+            )
+            
+            items(statusDisplayNames.size) { index ->
+                val status = statusDisplayNames.keys.elementAt(index)
+                val isSelected = selectedStatusFilters.contains(status)
+                ElevatedFilterChip(
+                    selected = isSelected,
+                    onClick = {
+                        if (isSelected) {
+                            selectedStatusFilters.remove(status)
+                        } else {
+                            selectedStatusFilters.add(status)
+                        }
+                    },
+                    label = { Text(statusDisplayNames[status] ?: status, fontSize = 10.sp) },
+                    modifier = Modifier.height(28.dp).testTag("filter_chip_$status")
+                )
+            }
         }
 
         // Help Indicator Banner
@@ -1309,6 +1407,53 @@ fun MapDashboard(
                 }
                 }
             }
+            }
+
+            // Nearby Leads Overlay
+            val nearbyLeads = leads.filter { calculateDistanceMiles(userLatitude, userLongitude, it.latitude, it.longitude) <= 0.5 }
+            if (nearbyLeads.isNotEmpty()) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                    shadowElevation = 8.dp
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "Nearby Leads (< 0.5 mi)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        nearbyLeads.take(5).forEach { lead ->
+                            Row(
+                                modifier = Modifier.padding(vertical = 4.dp).fillMaxWidth(0.35f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val dotColor = when (lead.status) {
+                                    "WARM_LEAD" -> Color(0xFF1565C0)
+                                    "GO_BACK" -> Color(0xFFF57C00)
+                                    "NOT_HOME" -> Color(0xFF757575)
+                                    "CUSTOMER" -> Color(0xFF2E7D32)
+                                    "REFUSED" -> Color(0xFFC62828)
+                                    else -> Color.DarkGray
+                                }
+                                Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = lead.address.take(18) + (if (lead.address.length > 18) "..." else ""),
+                                    fontSize = 11.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Legend indicators
@@ -1934,6 +2079,31 @@ fun MapDashboard(
     // DIALOG: ADD/DROP LEAD PIN
     // ==========================================
     if (showAddDialog && (pendingAddCoordinates != null || (pendingLatitude != null && pendingLongitude != null))) {
+        val dialogContext = LocalContext.current
+        LaunchedEffect(pendingLatitude, pendingLongitude, pendingAddCoordinates) {
+            val resolvedLat = pendingLatitude ?: getLatFromCanvasY(pendingAddCoordinates!!.y)
+            val resolvedLng = pendingLongitude ?: getLngFromCanvasX(pendingAddCoordinates!!.x)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val geocoder = android.location.Geocoder(dialogContext, java.util.Locale.getDefault())
+                    val addresses = geocoder.getFromLocation(resolvedLat, resolvedLng, 1)
+                    if (!addresses.isNullOrEmpty()) {
+                        val county = addresses[0].subAdminArea ?: addresses[0].adminArea // subAdminArea is usually county
+                        if (!county.isNullOrBlank()) {
+                            pendingCounty = county
+                        } else {
+                            pendingCounty = "Unknown County"
+                        }
+                    } else {
+                         pendingCounty = "Unknown County"
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    pendingCounty = "County lookup failed"
+                }
+            }
+        }
+
         var ownerName by remember { mutableStateOf("") }
         var contactPhone by remember { mutableStateOf("") }
         var inputAddress by remember { mutableStateOf(pendingAddressSuggestion) }
@@ -1961,6 +2131,19 @@ fun MapDashboard(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
+
+                    if (pendingCounty != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Suggested County: $pendingCounty", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                            }
+                        }
+                    }
 
                     OutlinedTextField(
                         value = ownerName,
@@ -2923,7 +3106,10 @@ fun getLeafletHtml(leadsJson: String, staticHousePlotsJson: String, centerLat: D
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+            <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+            <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
             <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+            <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
             <style>
                 html, body, #map {
                     height: 100%;
@@ -3144,8 +3330,19 @@ fun getLeafletHtml(leadsJson: String, staticHousePlotsJson: String, centerLat: D
                     weight: 3
                 }).addTo(map);
 
-                var markerGroup = L.layerGroup().addTo(map);
-                var offlineMarkerGroup = L.layerGroup().addTo(map);
+                var markerGroup = L.markerClusterGroup({
+                    spiderfyOnMaxZoom: true,
+                    showCoverageOnHover: false,
+                    zoomToBoundsOnClick: true,
+                    maxClusterRadius: 50
+                }).addTo(map);
+
+                var offlineMarkerGroup = L.markerClusterGroup({
+                    spiderfyOnMaxZoom: true,
+                    showCoverageOnHover: false,
+                    zoomToBoundsOnClick: true,
+                    maxClusterRadius: 50
+                }).addTo(map);
 
                 // ==========================================
                 // INDEXEDDB DATABASE INTEGRATION
@@ -3552,4 +3749,130 @@ fun LeafletMapView(
         },
         modifier = modifier
     )
+}
+
+@Composable
+fun UserMenuScreen(
+    allLeads: List<Lead>,
+    onImportLeads: (List<Lead>) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var email by remember { mutableStateOf("demo@example.com") }
+    var name by remember { mutableStateOf("John Doe") }
+    var companyName by remember { mutableStateOf("Acme Roofing") }
+
+    val context = LocalContext.current
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if (uri != null) {
+            context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                val writer = outputStream.bufferedWriter()
+                writer.write("Name,Address,Status,Latitude,Longitude,Phone,Notes\n")
+                allLeads.forEach { lead ->
+                    val safeName = lead.name.replace(",", " ")
+                    val safeAddress = lead.address.replace(",", " ")
+                    val safeStatus = lead.status.replace(",", " ")
+                    val safeNotes = lead.notes.replace("\n", " ").replace(",", " ")
+                    val safePhone = lead.phone.replace(",", " ")
+                    writer.write("${safeName},${safeAddress},${safeStatus},${lead.latitude},${lead.longitude},${safePhone},${safeNotes}\n")
+                }
+                writer.flush()
+            }
+        }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                val reader = inputStream.bufferedReader()
+                // skip header
+                reader.readLine()
+                val imported = mutableListOf<Lead>()
+                reader.forEachLine { line ->
+                    val parts = line.split(",")
+                    if(parts.size >= 7) {
+                        imported.add(
+                            Lead(
+                                name = parts[0],
+                                address = parts[1],
+                                status = parts[2],
+                                latitude = parts[3].toDoubleOrNull() ?: 0.0,
+                                longitude = parts[4].toDoubleOrNull() ?: 0.0,
+                                phone = parts[5],
+                                notes = parts[6]
+                            )
+                        )
+                    }
+                }
+                onImportLeads(imported)
+            }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = "User Profile",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Name") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = email,
+            onValueChange = { email = it },
+            label = { Text("Email") },
+            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)
+        )
+        OutlinedTextField(
+            value = companyName,
+            onValueChange = { companyName = it },
+            label = { Text("Company Name") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+        Text(
+            text = "Data Management",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+
+        Button(
+            onClick = {
+                exportLauncher.launch("leads_export.csv")
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+        ) {
+            Icon(Icons.Default.Share, contentDescription = "Export")
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Export Leads to CSV")
+        }
+
+        OutlinedButton(
+            onClick = {
+                importLauncher.launch(arrayOf("text/csv", "*/*"))
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "Import")
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Import Leads from CSV")
+        }
+    }
 }
